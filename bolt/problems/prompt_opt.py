@@ -1,8 +1,15 @@
+import warnings
+from typing import Optional
+
 import numpy as np
 import torch
 
 from ..functions.tabular import TabularFunctionEmbeddings
 from .base import LLMTestProblem
+
+# Beyond this distance a query is not a candidate. Well above float32 rounding of
+# a candidate (~1e-7) and well below the gap between distinct prompts (median ~0.4).
+SNAP_TOL = 1e-4
 
 
 class PO(LLMTestProblem):
@@ -14,6 +21,9 @@ class PO(LLMTestProblem):
     Reward: Math500 0-shot score for Qwen3-14B given a prompt in the system instruction.
     Search space: `dim`-dimensional embeddings from EmbeddingGemma, bounded to (-0.20, 0.27).
     """
+
+    hf_repo = "anonom799/po_qwen14b_tabular_data"
+    hf_revision = "v0.1.0"
 
     _bounds_range: tuple[float, float] = (-0.20, 0.27)
     _check_grad_at_opt: bool = True
@@ -53,14 +63,35 @@ class PO(LLMTestProblem):
         super().__init__(noise_std=noise_std, negate=negate, dtype=dtype)
 
         self.obj_func = TabularFunctionEmbeddings(
-            "anonom799/po_qwen14b_tabular_data",
+            self.hf_repo,
             ["embedding"],
             "score",
             x_proc_func=lambda x: np.vstack(x)[:, : self.dim],
+            revision=self.hf_revision,
         )
+
+    def candidates(
+        self,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
+    ) -> torch.Tensor:
+        r"""The full candidate set: every prompt embedding in the table.
+
+        Args:
+            dtype: dtype of the returned tensor. Defaults to the bounds' dtype.
+            device: device of the returned tensor.
+
+        Returns:
+            torch.Tensor: ``(table_size, dim)``-dim tensor of embeddings.
+        """
+        dtype = self.bounds.dtype if dtype is None else dtype
+        return self.obj_func.Xs.to(dtype=dtype, device=device)
 
     def _evaluate_true(self, X: torch.Tensor) -> torch.Tensor:
         r"""Evaluate the objective using the nearest neighbour to tabular data.
+
+        A point that is not a candidate is snapped to the nearest one, with a
+        warning.
 
         Args:
             X (torch.Tensor): Input tensor of shape `(N, dim)`.
@@ -68,14 +99,29 @@ class PO(LLMTestProblem):
         Returns:
             torch.Tensor: Objective tensor of shape `(N, 1)`.
         """
-        return self.obj_func.evaluate_true(X)
+        Xs = self.obj_func.Xs.to(device=X.device, dtype=X.dtype)
+        idx = torch.cdist(X, Xs).argmin(dim=1)
+        # cdist's matmul shortcut is inexact (~1e-3 in float32), so measure the
+        # distance to the chosen candidate directly.
+        off_table = (X - Xs[idx]).norm(dim=-1) > SNAP_TOL
+        if bool(off_table.any()):
+            n = int(off_table.sum())
+            warnings.warn(
+                f"{type(self).__name__}: {n}/{len(X)} points are not candidates; "
+                "snapped to the nearest one. Search over `candidates()`.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        return (
+            self.obj_func.ys[idx.cpu()].unsqueeze(-1).to(device=X.device, dtype=X.dtype)
+        )
 
 
 class PO128(PO):
     r"""Prompt optimization via search in a 128-dimensional embedding space.
 
     The search space consists of 128-dimensional truncated embeddings from EmbeddingGemma.
-    The full discrete candidate set is accessible at ``prob.obj_func.Xs``, and
+    The full discrete candidate set is returned by ``prob.candidates()``, and
     can be used directly for discrete optimization. Evaluating any point X via
     ``prob(X)`` returns the Math500 0-shot accuracy of its nearest neighbor in
     the candidate set.
@@ -99,7 +145,7 @@ class PO256(PO):
     r"""Prompt optimization via search in a 256-dimensional embedding space.
 
     The search space consists of 256-dimensional truncated embeddings from EmbeddingGemma.
-    The full discrete candidate set is accessible at ``prob.obj_func.Xs``, and
+    The full discrete candidate set is returned by ``prob.candidates()``, and
     can be used directly for discrete optimization. Evaluating any point X via
     ``prob(X)`` returns the Math500 0-shot accuracy of its nearest neighbor in
     the candidate set.
@@ -123,7 +169,7 @@ class PO512(PO):
     r"""Prompt optimization via search in a 512-dimensional embedding space.
 
     The search space consists of 512-dimensional truncated embeddings from EmbeddingGemma.
-    The full discrete candidate set is accessible at ``prob.obj_func.Xs``, and
+    The full discrete candidate set is returned by ``prob.candidates()``, and
     can be used directly for discrete optimization. Evaluating any point X via
     ``prob(X)`` returns the Math500 0-shot accuracy of its nearest neighbor in
     the candidate set.
@@ -147,7 +193,7 @@ class PO768(PO):
     r"""Prompt optimization via search in a 768-dimensional embedding space.
 
     The search space consists of 768-dimensional truncated embeddings from EmbeddingGemma.
-    The full discrete candidate set is accessible at ``prob.obj_func.Xs``, and
+    The full discrete candidate set is returned by ``prob.candidates()``, and
     can be used directly for discrete optimization. Evaluating any point X via
     ``prob(X)`` returns the Math500 0-shot accuracy of its nearest neighbor in
     the candidate set.

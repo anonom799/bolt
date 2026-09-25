@@ -17,6 +17,7 @@ class TabularFunction(Function, ABC):
         input_cols: list[str],
         output_col: str,
         x_proc_func: Optional[Callable[..., Any]] = None,
+        revision: Optional[str] = None,
     ) -> None:
         r"""Load a tabular dataset from HuggingFace and build the lookup table.
 
@@ -24,19 +25,26 @@ class TabularFunction(Function, ABC):
             hf_repo: HuggingFace dataset repository id.
             input_cols: Column name(s) used as the input features for NN search.
             output_col: Column name whose values are returned as function outputs.
-            x_proc_func: Optional callable to transform the raw column data
-                before converting to a tensor. Receives the column dict and
-                must return an array-like.
+            x_proc_func: Optional callable to transform the input table before
+                converting to a tensor. Receives an ``(table_size, d)`` float64
+                array with columns in ``input_cols`` order and must return an
+                array-like.
+            revision: Git revision to fetch — a tag, branch, or commit SHA.
+                Defaults to the repo's main branch.
         """
         super().__init__()
 
-        self.ds = load_dataset(hf_repo, split="train")
+        self.ds = load_dataset(hf_repo, split="train", revision=revision)
 
         self.input_cols = input_cols
         self.output_col = output_col
         self.x_proc_func = x_proc_func
 
-        y_np = np.array(self.ds[output_col])
+        y_np = np.asarray(self.ds[output_col])
+        if y_np.dtype == object:
+            # `datasets` returns None for each null in a column, i.e. object
+            # dtype, which torch cannot take. Coerce so the gaps become NaN.
+            y_np = y_np.astype(np.float64)
         self.ys = torch.tensor(y_np)
 
         self.Xs = self.init_Xs(input_cols, x_proc_func)
@@ -48,14 +56,19 @@ class TabularFunction(Function, ABC):
 
         Args:
             input_cols: Column name(s) to read from the dataset.
-            x_proc_func: Optional transform applied to the raw column data.
+            x_proc_func: Optional transform applied to the stacked input table.
 
         Returns:
             Float tensor of shape ``(table_size, d)`` used for nearest-neighbour
             search in :meth:`_evaluate_true`.
         """
-        X_raw = self.ds[input_cols]
-        X_np = np.asarray(x_proc_func(X_raw) if x_proc_func is not None else X_raw)
+        # Indexing a `datasets.Dataset` with a list selects rows, not columns, so
+        # the table is assembled one named column at a time.
+        X_np = np.column_stack(
+            [np.asarray(self.ds[col], dtype=np.float64) for col in input_cols]
+        )
+        if x_proc_func is not None:
+            X_np = np.asarray(x_proc_func(X_np))
         return torch.tensor(X_np)
 
     def _evaluate_true(self, X: torch.Tensor) -> torch.Tensor:
@@ -88,6 +101,7 @@ class TabularFunctionEmbeddings(TabularFunction):
         input_cols: list[str],
         output_col: str,
         x_proc_func: Optional[Callable[..., Any]] = None,
+        revision: Optional[str] = None,
     ) -> None:
         r"""Load a tabular dataset where inputs are stored as embedding lists.
 
@@ -97,11 +111,19 @@ class TabularFunctionEmbeddings(TabularFunction):
             output_col: Column name whose values are returned as function outputs.
             x_proc_func: Optional callable to transform the raw list-of-embeddings
                 before stacking into a tensor.
+            revision: Git revision to fetch — a tag, branch, or commit SHA.
+                Defaults to the repo's main branch.
         """
         assert len(input_cols) == 1, (
             "TabularFunctionEmbeddings requires exactly one input column"
         )
-        super().__init__(hf_repo, input_cols, output_col, x_proc_func=x_proc_func)
+        super().__init__(
+            hf_repo,
+            input_cols,
+            output_col,
+            x_proc_func=x_proc_func,
+            revision=revision,
+        )
 
     def init_Xs(
         self, input_cols: list[str], x_proc_func: Optional[Callable[..., Any]] = None

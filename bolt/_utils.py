@@ -28,7 +28,39 @@ def unstandardize_y(
     return (y * y_std) + y_mean
 
 
-def pull_info_from_hf_hub(hf_repo: str) -> tuple[str, dict, np.ndarray, np.ndarray]:
+def pull_noise_info_from_hf_hub(
+    hf_repo: str, revision: str | None = None
+) -> tuple[str, dict]:
+    r"""Download noise emulator weights and config from a HuggingFace repo.
+
+    Files fetched (cached locally by ``huggingface_hub``):
+        - ``noise_model.safetensors`` — pretrained weights
+        - ``config.json`` — kernel config, including the ``gamma`` the model was
+          fit with from emulator version 0.2.0 onwards
+
+    Args:
+        hf_repo: HuggingFace repository id, e.g.
+            ``"anonom799/dm_qwen4b_noise_emulator"``.
+        revision: Git revision to fetch — a tag, branch, or commit SHA.
+            Defaults to the repo's main branch.
+
+    Returns:
+        A two-tuple ``(model_path, model_config)`` where ``model_path`` is the
+        local path to the weights file and ``model_config`` is the parsed JSON
+        dict.
+    """
+    model_path = hf_hub_download(hf_repo, "noise_model.safetensors", revision=revision)
+    config_path = hf_hub_download(hf_repo, "config.json", revision=revision)
+
+    with open(config_path, "r") as f:
+        model_config = json.load(f)
+
+    return model_path, model_config
+
+
+def pull_info_from_hf_hub(
+    hf_repo: str, revision: str | None = None
+) -> tuple[str, dict, np.ndarray, np.ndarray]:
     r"""Download model weights, config, and standardization stats from a HuggingFace repo.
 
     Files fetched (cached locally by ``huggingface_hub``):
@@ -38,23 +70,27 @@ def pull_info_from_hf_hub(hf_repo: str) -> tuple[str, dict, np.ndarray, np.ndarr
 
     Args:
         hf_repo: HuggingFace repository id, e.g. ``"anonom799/hpo_qwen8b_emulator"``.
+        revision: Git revision to fetch — a tag, branch, or commit SHA.
+            Defaults to the repo's main branch.
 
     Returns:
         A four-tuple ``(model_path, model_config, y_mean, y_std)`` where
         ``model_path`` is the local path to the weights file, ``model_config``
         is the parsed JSON dict, and ``y_mean`` / ``y_std`` are 1-D numpy arrays.
     """
-    model_path = hf_hub_download(hf_repo, "model.safetensors")
-    config_path = hf_hub_download(hf_repo, "config.json")
-    csv_path = hf_hub_download(hf_repo, "model_standardize.csv")
+    model_path = hf_hub_download(hf_repo, "model.safetensors", revision=revision)
+    config_path = hf_hub_download(hf_repo, "config.json", revision=revision)
+    csv_path = hf_hub_download(hf_repo, "model_standardize.csv", revision=revision)
 
     # read model config
     with open(config_path, "r") as f:
         model_config = json.load(f)
 
     # read standardization params
+    # copy=True: under pandas copy-on-write to_numpy returns a read-only view,
+    # which torch.as_tensor warns about downstream
     df = pd.read_csv(csv_path)
-    y_mean = df["y_mean"].to_numpy()
-    y_std = df["y_std"].to_numpy()
+    y_mean = df["y_mean"].to_numpy(copy=True)
+    y_std = df["y_std"].to_numpy(copy=True)
 
     return model_path, model_config, y_mean, y_std
